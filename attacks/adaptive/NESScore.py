@@ -8,12 +8,18 @@ from attacks.Attack import Attack
 import numpy as np
 
 
+
+# model - StatefulClassifier
 class NESScore(Attack):
     def __init__(self, model, model_config, attack_config):
         super().__init__(model, model_config, attack_config)
 
+        from utils.logger import get_attack_logger
+        nesscore_logger = get_attack_logger("nesscore")
+
     def attack_untargeted(self, x, y):
         # original image loss
+        # x original image y original label
         probs_orig, is_cache = self.model(x)
         loss_orig = self.loss(probs_orig, y)
 
@@ -39,7 +45,8 @@ class NESScore(Attack):
         step_attempts = 0
 
         # attack loop
-        pbar = tqdm(range(self.attack_config["max_iter"]), colour="red", leave=True)
+        # pbar = tqdm(range(self.attack_config["max_iter"]), colour="red", leave=True)
+        pbar = tqdm(range(self.attack_config["max_iter"]),leave=True)
         for _ in pbar:
             # estimate gradient
             avg_loss, grad_est = self.estimate_gradient(x_adv, y, self.attack_config["num_dirs"], var)
@@ -115,7 +122,8 @@ class NESScore(Attack):
         step_attempts = 0
 
         # attack loop
-        pbar = tqdm(range(self.attack_config["max_iter"]), colour="red", leave=True)
+        # pbar = tqdm(range(self.attack_config["max_iter"]), colour="red", leave=True)
+        pbar = tqdm(range(self.attack_config["max_iter"]), leave=True)
         for _ in pbar:
             # estimate gradient
             avg_loss, grad_est = self.estimate_gradient(x_adv, y, self.attack_config["num_dirs"], var)
@@ -142,6 +150,7 @@ class NESScore(Attack):
             eta = torch.clamp(x_adv - x, min=-self.attack_config["eps"], max=self.attack_config["eps"])
             x_adv = torch.clamp(x + eta, min=0, max=1).detach_()
 
+            # 每 step_query_interval 轮查询一次模型
             if _ % step_query_interval == 0:
                 step_attempts += 1
                 curr_probs, is_cache = self.model(x_adv)

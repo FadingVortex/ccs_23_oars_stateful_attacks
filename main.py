@@ -13,7 +13,7 @@ import numpy as np
 import torch
 import torchvision
 from torchvision import transforms
-from torch.utils.tensorboard import SummaryWriter
+# from torch.utils.tensorboard import SummaryWriter
 
 from attacks.attacks import *
 from models.statefuldefense import init_stateful_classifier
@@ -26,10 +26,12 @@ def main(args):
     # Set up logging and load config.
     if not args.disable_logging:
         random.seed(round(time.time() * 1000))
+        # [:-1] 截取除了最后一个的部分
         log_dir = os.path.join("/".join(args.config.split("/")[:-1]), 'logs', args.config.split("/")[-1].split(".")[0])
-        writer = SummaryWriter(log_dir=log_dir)
+        # writer = SummaryWriter(log_dir=log_dir)
         logging.basicConfig(
-            filename=os.path.join(writer.log_dir, f'log_{args.start_idx}_{args.start_idx + args.num_images}.txt'),
+            # filename=os.path.join(writer.log_dir, f'log_{args.start_idx}_{args.start_idx + args.num_images}.txt'),
+            filename=os.path.join(log_dir, f'log_{args.start_idx}_{args.start_idx + args.num_images}.txt'),
             level=logging.INFO)
         logging.info(args)
 
@@ -39,12 +41,14 @@ def main(args):
     logging.info(model_config)
     logging.info(attack_config)
 
+    # model - StatefulClassifier
     # Load model.
     model = init_stateful_classifier(model_config)
     model.eval()
     model.to("cuda")
 
     # Load dataset.
+    # transform 作用：将 PIL.Image（Pillow 图像）或 numpy.ndarray（形如 (H, W, C)，像素值 0-255）转换为 PyTorch Tensor，并且归一化到 [0,1] 之间
     if model_config["dataset"] == "mnist":
         transform = transforms.Compose([transforms.Resize(32), transforms.ToTensor()])
     elif model_config["dataset"] == "cifar10":
@@ -72,7 +76,7 @@ def main(args):
     if attack_config["attack"] == "natural_accuracy":
         natural_performance(model, test_loader)
     else:
-        attack_loader(model, test_loader, model_config, attack_config)
+        attack_loader_defense(model, test_loader, model_config, attack_config)
 
 
 if __name__ == '__main__':

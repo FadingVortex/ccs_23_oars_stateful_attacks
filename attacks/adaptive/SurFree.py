@@ -13,6 +13,8 @@ from attacks.Attack import Attack
 class SurFree(Attack):
     def __init__(self, model, model_config, attack_config):
         super().__init__(model, model_config, attack_config)
+        from utils.logger import get_attack_logger
+        self.surfree_logger = get_attack_logger("surfree")
 
     def is_adversarial(self, x, y, targeted):
         logits, is_cache = self.model(x)
@@ -104,6 +106,42 @@ class SurFree(Attack):
         return im_dct
 
     def attack_untargeted(self, x, y):
+        """
+        无目标对抗攻击函数，通过迭代搜索生成对抗样本，使模型对输入x的分类错误（非特定错误类别）。
+        核心策略：在决策边界附近通过圆形步进和正交方向探索，寻找距离原始输入最近的对抗样本。
+
+        Args:
+            x (torch.Tensor): 原始输入样本，形状为 [C, H, W] 或 [B, C, H, W]。
+            y (torch.Tensor): 原始标签，形状需与模型输出兼容。
+
+        Returns:
+            torch.Tensor: 如果攻击成功，返回对抗样本 x_adv（满足 norm_dist < eps）；
+                         如果攻击失败，返回原始输入 x。
+
+        Algorithm Steps:
+            1. 初始化：通过随机扰动生成初始对抗样本，并用二分搜索精确到决策边界。
+            2. 主循环：
+               a. 生成新搜索方向（DCT频域扰动 + Gram-Schmidt正交化）。
+               b. 在方向平面内圆形步进，评估多个旋转角度。
+               c. 动态调整角度搜索范围（theta_max）和步进策略。
+               d. 保留距离更小的有效对抗样本。
+            3. 终止条件检查：
+               a. 成功：找到满足 norm_dist < eps 的对抗样本。
+               b. 失败：迭代耗尽或方向搜索连续失败。
+
+        Exit Conditions:
+            - 成功退出：
+              1. 主循环中 norm_dist < eps 时提前返回 x_adv。
+              2. 最终二分搜索后 norm_dist < eps 时返回 x_adv。
+            - 失败退出：
+              1. 主循环结束未满足 norm_dist < eps 时返回 x。
+              2. 连续 step_max_attempts 次方向搜索失败时隐式终止（通过 self.end）。
+
+        Notes:
+            - 距离度量：归一化L2距离，计算公式为 norm_dist = ||x_adv - x||_2 / sqrt(C*H*W)。
+            - 方向生成：结合DCT变换的频域扰动和随机噪声，确保探索多样性。
+            - 自适应调整：通过参数 rho 动态缩放角度搜索范围 theta_max。
+        """
         # Initialize
         x_adv = x.clone()
         while True:
@@ -124,7 +162,8 @@ class SurFree(Attack):
         rollback = False
 
         # Attack
-        pbar = tqdm(range(self.attack_config["max_iter"]), colour="red")
+        # pbar = tqdm(range(self.attack_config["max_iter"]), colour="red")
+        pbar = tqdm(range(self.attack_config["max_iter"]))
         for t in pbar:
             # Get new orthogonal direction and corresponding best angle for a circular step
             epsilon = 0
@@ -178,8 +217,9 @@ class SurFree(Attack):
                     theta_max = theta_max / self.attack_config["rho"]
                     epsilon = best_epsilon
 
-                pbar.set_description(
-                    f"Step {t}: Norm distance: {norm_dist} | Cache Hits : {self._model.cache_hits}/{self._model.total}")
+                log_msg = f"Step {t}: Norm distance: {norm_dist} | Cache Hits : {self._model.cache_hits}/{self._model.total}"
+                pbar.set_description(log_msg)
+                self.surfree_logger.info(log_msg)
             evolution_function = lambda degree: torch.clamp(
                 x + self.step_in_circular_direction(direction, new_direction, torch.linalg.norm(x_adv - x), degree), 0,
                 1)
@@ -239,8 +279,9 @@ class SurFree(Attack):
 
             # Logging current progress with normalized L2 distance
             norm_dist = torch.linalg.norm(x_adv - x) / (x.shape[-1] * x.shape[-2] * x.shape[-3]) ** 0.5
-            pbar.set_description(
-                f"Step {t}: Norm distance: {norm_dist} | Cache Hits : {self._model.cache_hits}/{self._model.total}")
+            log_msg = f"Step {t}: Norm distance: {norm_dist} | Cache Hits : {self._model.cache_hits}/{self._model.total}"
+            pbar.set_description(log_msg)
+            self.surfree_logger.info(log_msg)
             if norm_dist < self.attack_config["eps"]:
                 return x_adv
 
@@ -289,6 +330,7 @@ class SurFree(Attack):
                 lower = mid
             print(
                 f"Step Size : {angle:.6f} | Cache Hits : {cache_hits}/{self.attack_config['adaptive']['bs_min_angle_sample_size']}, upper : {upper:.6f}, lower : {lower:.6f}")
+            self.surfree_logger.info(f"Step Size : {angle:.6f} | Cache Hits : {cache_hits}/{self.attack_config['adaptive']['bs_min_angle_sample_size']}, upper : {upper:.6f}, lower : {lower:.6f}")
         return angle
 
     def attack_targeted(self, x, y, x_adv):
@@ -307,7 +349,8 @@ class SurFree(Attack):
         rollback = False
 
         # Attack
-        pbar = tqdm(range(self.attack_config["max_iter"]), colour="red")
+        # pbar = tqdm(range(self.attack_config["max_iter"]), colour="red")
+        pbar = tqdm(range(self.attack_config["max_iter"]))
         for t in pbar:
             # Get new orthogonal direction and corresponding best angle for a circular step
             epsilon = 0
@@ -361,8 +404,9 @@ class SurFree(Attack):
                     theta_max = theta_max / self.attack_config["rho"]
                     epsilon = best_epsilon
 
-                pbar.set_description(
-                    f"Step {t}: Norm distance: {norm_dist} | Cache Hits : {self._model.cache_hits}/{self._model.total}")
+                log_msg = f"Step {t}: Norm distance: {norm_dist} | Cache Hits : {self._model.cache_hits}/{self._model.total}"
+                pbar.set_description(log_msg)
+                self.surfree_logger.info(log_msg)
             evolution_function = lambda degree: torch.clamp(
                 x + self.step_in_circular_direction(direction, new_direction, torch.linalg.norm(x_adv - x), degree), 0,
                 1)
@@ -422,8 +466,9 @@ class SurFree(Attack):
 
             # Logging current progress with normalized L2 distance
             norm_dist = torch.linalg.norm(x_adv - x) / (x.shape[-1] * x.shape[-2] * x.shape[-3]) ** 0.5
-            pbar.set_description(
-                f"Step {t}: Norm distance: {norm_dist} | Cache Hits : {self._model.cache_hits}/{self._model.total} | Theta : {theta_max}")
+            log_msg = f"Step {t}: Norm distance: {norm_dist} | Cache Hits : {self._model.cache_hits}/{self._model.total} | Theta : {theta_max}"
+            pbar.set_description(log_msg)
+            self.surfree_logger.info(log_msg)
             if norm_dist < self.attack_config["eps"]:
                 return x_adv
 

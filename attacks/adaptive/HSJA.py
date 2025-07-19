@@ -13,6 +13,8 @@ from attacks.Attack import Attack
 class HSJA(Attack):
     def __init__(self, model, model_config, attack_config):
         super().__init__(model, model_config, attack_config)
+        from utils.logger import get_attack_logger
+        self.hsja_logger = get_attack_logger("hsja")
 
     def phi(self, x, y, targeted):
         x = torch.clamp(x, 0, 1)
@@ -69,6 +71,8 @@ class HSJA(Attack):
                 lower = mid
             print(f"Var : {var:.6f} | "
                   f"Cache Hits : {cache_hits}/{self.attack_config['adaptive']['bs_grad_var_sample_size']}")
+            self.hsja_logger.info(f"Var : {var:.6f} | "
+                    f"Cache Hits : {cache_hits}/{self.attack_config['adaptive']['bs_grad_var_sample_size']}")
         return var
 
     def attack_untargeted(self, x, y):
@@ -167,124 +171,132 @@ class HSJA(Attack):
 
             # 7. check budget and log progress
             norm_dist = torch.linalg.norm(x_adv - x) / (x.shape[-1] * x.shape[-2] * x.shape[-3]) ** 0.5
-            pbar.set_description(
-                f"Iter {t} | L2_normalized={norm_dist:.4f} | Cache Hits : {self.get_cache_hits()}/{self.get_total_queries()} | delta={delta:.4f}")
+            log_msg = f"Iter {t} | L2_normalized={norm_dist:.4f} | Cache Hits : {self.get_cache_hits()}/{self.get_total_queries()} | delta={delta:.4f}"
+            pbar.set_description(log_msg)
+            self.hsja_logger.info(log_msg)
             if norm_dist <= self.attack_config["eps"]:
                 return x_adv
         return x
 
     def attack_targeted(self, x, y, x_adv):
-        x = x.cpu()
-        y = y.cpu()
-        x_adv = x_adv.cpu()
-        dim = torch.prod(torch.tensor(x.shape[1:]))
-        theta = 1 / (torch.sqrt(dim) * dim)
+        x = x.cpu()  # 将输入 x 从 GPU 转移到 CPU
+        y = y.cpu()  # 将标签 y 从 GPU 转移到 CPU
+        x_adv = x_adv.cpu()  # 将对抗样本 x_adv 从 GPU 转移到 CPU
+        dim = torch.prod(torch.tensor(x.shape[1:]))  # 计算输入数据 x 的维度大小（除去 batch_size）
+        theta = 1 / (torch.sqrt(dim) * dim)  # 定义 theta 参数，用于梯度计算
 
-        # initialize
-        x_adv = self.binary_search_to_boundary(x, y, x_adv, 0.001, targeted=True)
-        norm_dist = torch.linalg.norm(x_adv - x) / (x.shape[-1] * x.shape[-2] * x.shape[-3]) ** 0.5
-        x_adv_prev = None
-        step_attempts = 0
-        rollback = False
+        # 初始化对抗样本
+        x_adv = self.binary_search_to_boundary(x, y, x_adv, 0.001, targeted=True)  # 二分搜索调整对抗样本，使其靠近决策边界
+        norm_dist = torch.linalg.norm(x_adv - x) / (x.shape[-1] * x.shape[-2] * x.shape[-3]) ** 0.5  # 计算 L2 范数归一化距离
+        x_adv_prev = None  # 上一个对抗样本的值
+        step_attempts = 0  # 步骤尝试计数
+        rollback = False  # 是否回滚的标志
 
         if self.attack_config["adaptive"]["bs_grad_var"]:
-            delta = self.binary_search_gradient_estimation_variance(x)
+            delta = self.binary_search_gradient_estimation_variance(x)  # 如果启用了自适应调整，使用二分搜索估计梯度方差
 
-        # attack
-        pbar = tqdm(range(self.attack_config["max_iter"]))
+        # 攻击开始
+        pbar = tqdm(range(self.attack_config["max_iter"]))  # 初始化进度条
         for t in pbar:
-            # 1. compute new delta
+            # 1. 计算新的 delta（步长）
             if not self.attack_config["adaptive"]["bs_grad_var"]:
                 if t == 0 or x_adv_prev is None:
-                    delta = 0.1
+                    delta = 0.1  # 初始 delta
                 else:
-                    delta = torch.sqrt(dim) * theta * torch.linalg.norm(x_adv_prev - x)
+                    delta = torch.sqrt(dim) * theta * torch.linalg.norm(x_adv_prev - x)  # 更新 delta
 
-            # 2. compute number of directions
+            # 2. 计算方向的数量
             num_dirs_goal = min(int(self.attack_config["num_dirs"] * np.sqrt(t + 1)),
-                                self.attack_config["max_num_dirs"])
-            num_dirs_ = num_dirs_goal
+                                self.attack_config["max_num_dirs"])  # 根据当前迭代次数，动态调整最大方向数
+            num_dirs_ = num_dirs_goal  # 当前的方向数
 
-            # 3. estimate gradient
-            fval_obtained = torch.zeros(0, 1, 1, 1).to(x.device)
-            dirs_obtained = x_adv.repeat(0, 1, 1, 1).to(x.device)
-            for _ in range(self.attack_config["adaptive"]["grad_max_attempts"]):
-                dirs = torch.randn(x_adv.repeat(num_dirs_, 1, 1, 1).shape).to(x.device)
-                dirs = dirs / torch.linalg.norm(torch.flatten(dirs, start_dim=1), dim=1).reshape(-1, 1, 1, 1)
-                perturbed = x_adv.repeat(num_dirs_, 1, 1, 1) + delta * dirs
-                perturbed = torch.clamp(perturbed, 0, 1)
-                dirs = (perturbed - x_adv.repeat(num_dirs_, 1, 1, 1)) / delta
-                decision, is_cache = self.phi(perturbed, y, targeted=True)
-                fval = 2 * decision.reshape(num_dirs_, 1, 1, 1) - 1
+            # 3. 估计梯度
+            fval_obtained = torch.zeros(0, 1, 1, 1).to(x.device)  # 初始化 fval（目标函数值）
+            dirs_obtained = x_adv.repeat(0, 1, 1, 1).to(x.device)  # 初始化方向矩阵
+            for _ in range(self.attack_config["adaptive"]["grad_max_attempts"]):  # 尝试多次计算梯度
+                dirs = torch.randn(x_adv.repeat(num_dirs_, 1, 1, 1).shape).to(x.device)  # 随机初始化方向
+                dirs = dirs / torch.linalg.norm(torch.flatten(dirs, start_dim=1), dim=1).reshape(-1, 1, 1, 1)  # 归一化方向
+                perturbed = x_adv.repeat(num_dirs_, 1, 1, 1) + delta * dirs  # 对对抗样本进行扰动
+                perturbed = torch.clamp(perturbed, 0, 1)  # 限制扰动后的样本范围
+                dirs = (perturbed - x_adv.repeat(num_dirs_, 1, 1, 1)) / delta  # 计算方向变化
+                decision, is_cache = self.phi(perturbed, y, targeted=True)  # 计算扰动后的决策值
+                fval = 2 * decision.reshape(num_dirs_, 1, 1, 1) - 1  # 将决策值转换为目标函数值
 
+                # 筛选缓存命中样本
                 dirs = dirs[~np.array(is_cache)]
                 fval = fval[~np.array(is_cache)]
-                dirs_obtained = torch.cat((dirs_obtained, dirs), dim=0)
-                fval_obtained = torch.cat((fval_obtained, fval), dim=0)
+                dirs_obtained = torch.cat((dirs_obtained, dirs), dim=0)  # 将新获得的方向加入
+                fval_obtained = torch.cat((fval_obtained, fval), dim=0)  # 将新获得的目标函数值加入
 
-                if len(dirs_obtained) == num_dirs_goal:
+                if len(dirs_obtained) == num_dirs_goal:  # 如果获得足够的方向，退出循环
                     break
                 else:
                     num_dirs_ = num_dirs_goal - len(dirs_obtained)
-                    pbar.set_description(
-                        f"Iter {t} | L2_normalized={norm_dist:.4f} | "
-                        f"Cache Hits : {self.get_cache_hits()}/{self.get_total_queries()} | "
-                        f"delta={delta:.4f} | "
-                        f"dirs_obtained={len(dirs_obtained)}/{num_dirs_goal}")
-            dirs = dirs_obtained
-            fval = fval_obtained
+                    log_msg = f"Iter {t} | L2_normalized={norm_dist:.4f} | " \
+                              f"Cache Hits : {self.get_cache_hits()}/{self.get_total_queries()} | " \
+                              f"delta={delta:.4f} | " \
+                              f"dirs_obtained={len(dirs_obtained)}/{num_dirs_goal}"
+                    pbar.set_description(log_msg)  # 更新进度条显示信息
+                    self.hsja_logger.info(log_msg)  # 记录日志
+            dirs = dirs_obtained  # 最终获得的方向
+            fval = fval_obtained  # 最终获得的目标函数值
             if len(dirs) != num_dirs_goal and not self.attack_config["adaptive"]["grad_est_accept_partial"]:
-                self.end("Gradient estimation failure.")
+                self.end("Gradient estimation failure.")  # 如果没有获得足够的方向，则终止
             if len(dirs) == 0:
-                self.end("Gradient estimation failure. Literally zero directions.")
+                self.end("Gradient estimation failure. Literally zero directions.")  # 如果没有方向，则终止
 
+            # 计算梯度
             if torch.mean(fval) == 1:
                 grad = torch.mean(dirs, dim=0)
             elif torch.mean(fval) == -1:
                 grad = -torch.mean(dirs, dim=0)
             else:
-                fval -= torch.mean(fval)
-                grad = torch.mean(fval * dirs, dim=0)
-            grad = grad / torch.linalg.norm(grad)
+                fval -= torch.mean(fval)  # 对目标函数值进行偏移
+                grad = torch.mean(fval * dirs, dim=0)  # 根据目标函数值计算加权梯度
+            grad = grad / torch.linalg.norm(grad)  # 归一化梯度
 
-            # 4. step size search
+            # 4. 步长搜索
             step_attempts += 1
-            eta = torch.linalg.norm(x_adv - x) / np.sqrt(t + 1)
+            eta = torch.linalg.norm(x_adv - x) / np.sqrt(t + 1)  # 根据当前距离计算步长
             while True:
-                pbar.set_description(
-                    f"Iter {t} | L2_normalized={norm_dist:.4f} | "
-                    f"Cache Hits : {self.get_cache_hits()}/{self.get_total_queries()} | "
-                    f"delta={delta:.4f} | "
-                    f"dirs_obtained={len(dirs_obtained)}/{num_dirs_goal}")
-                decision, is_cache = self.phi(x_adv + eta * grad, y, targeted=True)
+                log_msg = f"Iter {t} | L2_normalized={norm_dist:.4f} | " \
+                          f"Cache Hits : {self.get_cache_hits()}/{self.get_total_queries()} | " \
+                          f"delta={delta:.4f} | " \
+                          f"dirs_obtained={len(dirs_obtained)}/{num_dirs_goal}"
+                pbar.set_description(log_msg)  # 更新进度条显示信息
+                self.hsja_logger.info(log_msg)  # 记录日志
+                decision, is_cache = self.phi(x_adv + eta * grad, y, targeted=True)  # 计算新的对抗样本
                 if is_cache[0] and step_attempts < self.attack_config["adaptive"]["step_max_attempts"]:
                     print("step cache hit")
                     rollback = True
-                    break
+                    break  # 如果步长遇到缓存命中，回滚
                 elif is_cache[0] and step_attempts >= self.attack_config["adaptive"]["step_max_attempts"]:
-                    self.end("Step movement failure.")
+                    self.end("Step movement failure.")  # 步长移动失败，终止
                 if decision == 1:
                     rollback = False
-                    break
-                eta /= 2
+                    break  # 如果成功找到对抗样本，退出循环
+                eta /= 2  # 如果失败，减小步长
+
             if rollback:
-                continue
-            step_attempts = 0
+                continue  # 如果回滚，则跳过当前迭代，继续下一轮
 
-            # 5. update
-            x_adv = torch.clamp(x_adv + eta * grad, 0, 1)
-            x_adv_prev = x_adv.clone()
+            step_attempts = 0  # 重置步长尝试次数
 
-            # 6. binary search to return to the boundary
-            x_adv = self.binary_search_to_boundary(x, y, x_adv, threshold=theta, targeted=True)
+            # 5. 更新对抗样本
+            x_adv = torch.clamp(x_adv + eta * grad, 0, 1)  # 更新对抗样本，并确保值在 [0, 1] 范围内
+            x_adv_prev = x_adv.clone()  # 保存当前对抗样本，用于下次计算 delta
 
-            # 7. check budget and log progress
-            norm_dist = torch.linalg.norm(x_adv - x) / (x.shape[-1] * x.shape[-2] * x.shape[-3]) ** 0.5
-            pbar.set_description(
-                f"Iter {t} | L2_normalized={norm_dist:.4f} | "
-                f"Cache Hits : {self.get_cache_hits()}/{self.get_total_queries()} | "
-                f"delta={delta:.4f} | "
-                f"dirs_obtained={len(dirs_obtained)}/{num_dirs_goal}")
-            if norm_dist <= self.attack_config["eps"]:
+            # 6. 二分搜索返回到边界
+            x_adv = self.binary_search_to_boundary(x, y, x_adv, threshold=theta, targeted=True)  # 返回决策边界
+
+            # 7. 检查预算并记录进度
+            norm_dist = torch.linalg.norm(x_adv - x) / (x.shape[-1] * x.shape[-2] * x.shape[-3]) ** 0.5  # 重新计算距离
+            log_msg = f"Iter {t} | L2_normalized={norm_dist:.4f} | " \
+                      f"Cache Hits : {self.get_cache_hits()}/{self.get_total_queries()} | " \
+                      f"delta={delta:.4f} | " \
+                      f"dirs_obtained={len(dirs_obtained)}/{num_dirs_goal}"
+            pbar.set_description(log_msg)  # 更新进度条显示信息
+            self.hsja_logger.info(log_msg)  # 记录日志
+            if norm_dist <= self.attack_config["eps"]:  # 如果距离足够小，认为攻击成功
                 return x_adv
-        return x
+        return x  # 如果达到最大迭代次数

@@ -24,6 +24,7 @@ predictions.
 from __future__ import absolute_import, division, print_function, unicode_literals
 
 import logging
+import os
 from typing import Optional, Tuple, TYPE_CHECKING
 
 import torch
@@ -58,36 +59,63 @@ class Boundary(Attack):
                                                min_epsilon=attack_config["eps"], attack_config=attack_config)
         self._model = self.model_art._model._model
 
+
+
+    # 带有目标标签的攻击
     def attack_targeted(self, x, y, x_adv):
+        # 将输入图像 x 和标签 y 从 GPU 转移到 CPU 并转换为 NumPy 数组
         x_np = x.detach().cpu().numpy()
         y_np = y.detach().cpu().numpy()[0]
 
+        # 确保输入的图像 x 是单张图像 (batch size = 1)
         assert x_np.shape[0] == 1
-        one_hot_labels = torch.zeros((1, self.attack_config['nb_classes']))
-        one_hot_labels[0, y_np] = 1
 
+        # 创建一个 one-hot 编码的标签向量，用于表示目标标签
+        one_hot_labels = torch.zeros((1, self.attack_config['nb_classes']))
+        one_hot_labels[0, y_np] = 1  # 设置目标标签的位置为 1
+
+        # 使用目标攻击生成对抗样本
         x_adv_np = self.art_attack.generate(x=x_np, y=one_hot_labels, x_adv_init=x_adv)
+
+        # 如果生成的对抗样本是一个错误信息字符串，则结束攻击
         if isinstance(x_adv_np, str):
             self.end(x_adv_np)
+
+        # 计算对抗样本和原始图像之间的 L2 范数（归一化）
         if np.linalg.norm(x_adv_np - x_np) / (x_np.shape[-1] * x_np.shape[-2] * x_np.shape[-3]) ** 0.5 < \
                 self.attack_config["eps"]:
+
             return torch.tensor(x_adv_np).cuda()
+
+        # 否则，返回原始图像
         return torch.tensor(x_np).cuda()
 
     def attack_untargeted(self, x, y):
+        # 将输入图像 x 和标签 y 从 GPU 转移到 CPU 并转换为 NumPy 数组
         x_np = x.detach().cpu().numpy()
         y_np = y.detach().cpu().numpy()[0]
 
+        # 确保输入的图像 x 是单张图像 (batch size = 1)
         assert x_np.shape[0] == 1
-        one_hot_labels = torch.zeros((1, self.attack_config['nb_classes']))
-        one_hot_labels[0, y_np] = 1
 
+        # 创建一个 one-hot 编码的标签向量，用于表示真实标签
+        one_hot_labels = torch.zeros((1, self.attack_config['nb_classes']))
+        one_hot_labels[0, y_np] = 1  # 设置真实标签的位置为 1
+
+        # 使用无目标攻击生成对抗样本
         x_adv_np = self.art_attack.generate(x=x_np, y=one_hot_labels, x_adv_init=None)
+
+        # 如果生成的对抗样本是一个错误信息字符串，则结束攻击
         if isinstance(x_adv_np, str):
             self.end(x_adv_np)
+
+        # 计算对抗样本和原始图像之间的 L2 范数（归一化）
         if np.linalg.norm(x_adv_np - x_np) / (x_np.shape[-1] * x_np.shape[-2] * x_np.shape[-3]) ** 0.5 < \
                 self.attack_config["eps"]:
+            # 如果范数小于设定的 epsilon，表示攻击成功，返回对抗样本
             return torch.tensor(x_adv_np).cuda()
+
+        # 否则，返回原始图像
         return torch.tensor(x_np).cuda()
 
 
@@ -165,6 +193,9 @@ class BoundaryAttack(EvasionAttack):
         self._check_params()
 
         self.curr_adv: Optional[np.ndarray] = None
+        from utils.logger import get_attack_logger
+        self.boundary_logger = get_attack_logger("boundary")
+
 
     def generate(self, x: np.ndarray, y: Optional[np.ndarray] = None, **kwargs) -> np.ndarray:
         """
@@ -296,14 +327,14 @@ class BoundaryAttack(EvasionAttack):
 
     def _attack(
             self,
-            initial_sample: np.ndarray,
-            original_sample: np.ndarray,
-            y_p: int,
-            target: int,
-            initial_delta: float,
-            initial_epsilon: float,
-            clip_min: float,
-            clip_max: float,
+            initial_sample: np.ndarray,  # 初始对抗样本（需满足攻击成功）
+            original_sample: np.ndarray,  # 原始输入样本
+            y_p: int,  # 原始输入样本的预测标签
+            target: int,  # 攻击目标标签（若为非定向攻击，可忽略）
+            initial_delta: float,  # 正交扰动初始步长
+            initial_epsilon: float,  # 向目标方向扰动初始步长
+            clip_min: float,  # 输入值的最小值（如像素值最小值）
+            clip_max: float,  # 输入值的最大值（如像素值最大值）
     ) -> np.ndarray:
         """
         Main function for the boundary attack.
@@ -325,30 +356,37 @@ class BoundaryAttack(EvasionAttack):
 
         self.curr_adv = x_adv
 
-        best_l2 = 10000000
-        best_l2_set = 0
+        best_l2 = 10000000      # 当前找到的最优L2距离
+        best_l2_set = 0         # 最优L2所在的迭代次数
         # Main loop to wander around the boundary
+        # 主循环：围绕边界随机游走，寻找更优对抗样本
         pbar = trange(self.max_iter, leave=True)
         for this_iter in pbar:
+            # 如果在50次内没有更新最优L2，则提前终止
             if this_iter - best_l2_set >= 50:
                 break
             # Trust region method to adjust delta
+            # Trust region：根据效果自适应调整 delta（正交扰动大小）
             for _ in range(self.num_trial):
                 potential_advs = []
                 for _ in range(self.sample_size):
+                    # 添加正交扰动
                     potential_adv = x_adv + self._orthogonal_perturb(self.curr_delta, x_adv, original_sample)
                     potential_adv = np.clip(potential_adv, clip_min, clip_max)
                     potential_advs.append(potential_adv)
                 # Don't let attacks go further than they need to, because it may make it un-adversarial vs cache.
 
+                # 预测扰动后的样本
                 out_preds, cache_preds = self.estimator.predict(np.array(potential_advs), batch_size=self.batch_size)
                 preds = np.argmax(
                     out_preds,
                     axis=1,
                 )
+                # 若拒识样本不允许调整 delta，则直接返回
                 if not self.attack_config["adaptive"]["delta_adjust_rejected_predictions"] and np.sum(np.where(cache_preds[:, 0], 1, 0)) > 0:
                     return "rejection in delta step"
 
+                # 针对性攻击或非定向攻击分类处理
                 if self.attack_config["targeted"]:
                     preds = np.where(cache_preds[:, 0], target, preds)
                 else:
@@ -359,20 +397,23 @@ class BoundaryAttack(EvasionAttack):
                 else:
                     is_adv = preds != y_p
 
+                # 计算成功率比值
                 if self.attack_config["adaptive"]["delta_extraction"]:
                     delta_ratio = np.mean(is_adv)
                 else:
                     delta_ratio = np.mean(is_adv[~np.array(cache_preds[:, 0])])
 
+                # 根据成功率动态调整 delta
                 if delta_ratio < 0.2:
                     self.curr_delta *= self.step_adapt
                 elif delta_ratio > 0.5:
                     self.curr_delta /= self.step_adapt
 
+                # 找到满足条件的对抗样本
                 delta_good = is_adv * (preds >= 0) * (~np.array(cache_preds[:, 0]))
 
                 if self.attack_config["adaptive"]["delta_extraction"]:
-                    cap = 1
+                    cap = 1     # 每次最多选一个样本
                 else:
                     cap = 1
 
@@ -385,13 +426,15 @@ class BoundaryAttack(EvasionAttack):
                     if self.attack_config["adaptive"]["delta_extraction"]:
                         self.curr_delta /= self.step_adapt
             else:  # pragma: no cover
-                return x_adv
+                return x_adv    # 所有尝试都失败了，返回当前最优对抗样本
 
 
             if self.curr_epsilon>1: self.curr_epsilon = initial_epsilon
 
             # Trust region method to adjust epsilon
+            # Trust region：根据效果自适应调整 epsilon（向目标靠近的扰动大小）
             for _ in range(self.num_trial):
+                # 向原始样本靠近
                 perturb = np.repeat(np.array([original_sample]), len(x_advs), axis=0) - x_advs
                 perturb *= self.curr_epsilon
                 new_potential_advs = x_advs + perturb
@@ -399,15 +442,18 @@ class BoundaryAttack(EvasionAttack):
                 # potential_advs = np.concatenate((x_advs, new_potential_advs))
                 potential_advs = new_potential_advs
 
+                # 预测新扰动样本
                 output_preds, cache_preds = self.estimator.predict(potential_advs, batch_size=self.batch_size)
                 preds = np.argmax(
                     output_preds,
                     axis=1,
                 )
 
+                # 若拒识样本不允许调整 epsilon，则直接返回
                 if not self.attack_config["adaptive"]["eps_adjust_rejected_predictions"] and np.sum(np.where(cache_preds[:, 0], 1, 0)) > 0:
                     return "rejection in eps step"
 
+                # 判断攻击是否成功
                 if self.attack_config["targeted"]:
                     preds = np.where(cache_preds[:, 0], target, preds)
                 else:
@@ -417,10 +463,12 @@ class BoundaryAttack(EvasionAttack):
                 else:
                     is_adv = preds != y_p
 
+                # 计算成功率
                 if self.attack_config["adaptive"]["eps_extraction"]:
                     #print("is_adv", is_adv, "preds", preds)
                     epsilon_ratio = np.mean(is_adv)
                 else:
+                    # 如果全部样本被拒绝，尝试更新当前最优对抗样本
                     if cache_preds.shape[0] - np.sum(cache_preds[:, 0]) == 0:
                         if np.mean(delta_good) > 0:
                             x_adv = self._best_adv(original_sample, x_advs_delta)
@@ -431,6 +479,7 @@ class BoundaryAttack(EvasionAttack):
                         epsilon_ratio = np.sum(is_adv[~np.array(cache_preds[:, 0])]) / (
                             cache_preds.shape[0] - np.sum(cache_preds[:, 0]))
 
+                # 若全部拒识，尝试保存当前对抗样本
                 if cache_preds.shape[0] == np.sum(cache_preds[:, 0]):
                     if np.mean(delta_good) > 0:
                         x_adv = self._best_adv(original_sample, x_advs_delta)
@@ -448,6 +497,7 @@ class BoundaryAttack(EvasionAttack):
                 #         continue
                 #     epsilon_ratio = np.sum(is_adv[~np.array(cache_preds[:, 0])]) / (cache_preds.shape[0] - np.sum(cache_preds[:, 0]))
 
+                # 判断是否有成功的扰动样本
                 delta_good = is_adv * (preds >= 0)
 
                 # if cache_preds.shape[0] == np.sum(cache_preds[:, 0]):
@@ -461,6 +511,7 @@ class BoundaryAttack(EvasionAttack):
                 # print(satisfied)
 
                 #print(epsilon_ratio)
+                # 更新 epsilon
                 if epsilon_ratio < 0.2:
                     self.curr_epsilon *= self.step_adapt
                 elif epsilon_ratio > 0.5:
@@ -473,20 +524,28 @@ class BoundaryAttack(EvasionAttack):
                     x_adv = self._best_adv(original_sample, potential_advs[np.where(delta_good)[0]])
                     self.curr_adv = x_adv
                     break
+
+            # 计算当前对抗样本的归一化 L2 距离
             l2_normalized = np.linalg.norm(x_adv - original_sample) / (
                     original_sample.shape[-1] * original_sample.shape[-2] * original_sample.shape[-3]) ** 0.5
 
+            # 更新最优对抗样本
             if l2_normalized < best_l2:
                 best_l2 = l2_normalized
                 best_l2_set = this_iter
 
             # l_inf = np.max(np.abs(x_adv - original_sample))
-            pbar.set_description("Step : {} | L2 Normalized: {} | curr_epsilon: {}".format(this_iter, l2_normalized, self.curr_epsilon))
+            # 日志记录与进度显示
+            log_msg = "Step : {} | L2 Normalized: {} | curr_epsilon: {}".format(this_iter, l2_normalized, self.curr_epsilon)
+            pbar.set_description(log_msg)
+            self.boundary_logger.info(log_msg)
+
+            # 满足精度要求提前结束
             if l2_normalized < self.attack_config["eps"]:
                 return x_adv
             elif self.curr_epsilon < 10e-6:
                 return original_sample
-        return x_adv
+        return x_adv    # 最终返回对抗样本
 
     def _orthogonal_perturb(self, delta: float, current_sample: np.ndarray, original_sample: np.ndarray) -> np.ndarray:
         """

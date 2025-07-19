@@ -15,6 +15,8 @@ import torch.nn.functional as F
 class QEBA(Attack):
     def __init__(self, model, model_config, attack_config):
         super().__init__(model, model_config, attack_config)
+        from utils.logger import get_attack_logger
+        self.qeba_logger = get_attack_logger("qeba")
 
     def phi(self, x, y, targeted):
         x = torch.clamp(x, 0, 1)
@@ -70,6 +72,8 @@ class QEBA(Attack):
             else:
                 lower = mid
             print(
+                f"Var : {var:.6f} | Cache Hits : {cache_hits}/{self.attack_config['adaptive']['bs_grad_var_sample_size']}")
+            self.qeba_logger.info(
                 f"Var : {var:.6f} | Cache Hits : {cache_hits}/{self.attack_config['adaptive']['bs_grad_var_sample_size']}")
         return var
 
@@ -177,8 +181,9 @@ class QEBA(Attack):
 
             # 7. check budget and log progress
             norm_dist = torch.linalg.norm(x_adv - x) / (x.shape[-1] * x.shape[-2] * x.shape[-3]) ** 0.5
-            pbar.set_description(
-                f"Iter {t} | L2_normalized={norm_dist:.4f} | Cache Hits : {self.get_cache_hits()}/{self.get_total_queries()} | delta={delta:.4f}")
+            log_msg = f"Iter {t} | L2_normalized={norm_dist:.4f} | Cache Hits : {self.get_cache_hits()}/{self.get_total_queries()} | delta={delta:.4f}"
+            pbar.set_description(log_msg)
+            self.qeba_logger.info(log_msg)
             if norm_dist <= self.attack_config["eps"]:
                 return x_adv
         return x
@@ -285,8 +290,9 @@ class QEBA(Attack):
 
             # 7. check budget and log progress
             norm_dist = torch.linalg.norm(x_adv - x) / (x.shape[-1] * x.shape[-2] * x.shape[-3]) ** 0.5
-            pbar.set_description(
-                f"Iter {t} | L2_normalized={norm_dist:.4f} | Cache Hits : {self.get_cache_hits()}/{self.get_total_queries()} | delta={delta:.4f}")
+            log_msg = f"Iter {t} | L2_normalized={norm_dist:.4f} | Cache Hits : {self.get_cache_hits()}/{self.get_total_queries()} | delta={delta:.4f}"
+            pbar.set_description(log_msg)
+            self.qeba_logger.info(log_msg)
             if norm_dist <= self.attack_config["eps"]:
                 return x_adv
         return x

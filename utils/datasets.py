@@ -8,12 +8,15 @@ from tqdm import tqdm
 
 
 class StatefulDefenseDataset(torch.utils.data.Dataset):
+    # name 是相应的数据集名称
     def __init__(self, name=None, transform=None, size=None, start_idx=0):
         json_path = './data/{}/{}.json'.format(name, name)
         images_json = list(json.load(open(json_path)).items())
+        # images_json = list(json.load(open(json_path))["images"].item())
         self.transform = transform
         self.name = name
 
+        # size 为 num_images 总共取多少张图片
         if size:
             images_json = images_json[start_idx:start_idx + size]
         self.data = []

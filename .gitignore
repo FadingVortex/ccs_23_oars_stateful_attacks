@@ -1,0 +1,23 @@
+# IDE
+.idea/
+*.iml
+
+# Python
+__pycache__/
+*.py[cod]
+
+# 数据/日志
+data/
+logs/
+pictures/
+
+data/*
+*.txt
+event.*
+*.log
+*.zip
+*.tar.gz
+*.tar
+*.7z
+output/*
+models/*

@@ -10,6 +10,8 @@ import numpy as np
 class Square(Attack):
     def __init__(self, model, model_config, attack_config):
         super().__init__(model, model_config, attack_config)
+        from utils.logger import get_attack_logger
+        self.square_logger = get_attack_logger("square")
 
     # def attack_untargeted(self, x, y):
     #     dim = torch.prod(torch.tensor(x.shape[1:]))
@@ -151,8 +153,9 @@ class Square(Attack):
             step_attempts += 1
             new_loss, is_cache = self.margin_loss(x_adv_candidate, y)
             if is_cache[0] and step_attempts < self.attack_config["adaptive"]["max_step_attempts"]:
-                pbar.set_description(
-                    f"Step: {t} | True Label: {y} | Predicted Label: {torch.argmax(self._model.model(x_adv))} | Loss: {loss} | square_size: {s} | Cache Hits : {self._model.cache_hits}/{self._model.total}")
+                log_msg = f"Step: {t} | True Label: {y} | Predicted Label: {torch.argmax(self._model.model(x_adv))} | Loss: {loss} | square_size: {s} | Cache Hits : {self._model.cache_hits}/{self._model.total}"
+                pbar.set_description(log_msg)
+                self.square_logger.info(log_msg)
                 continue
             elif is_cache[0] and step_attempts >= self.attack_config["adaptive"]["max_step_attempts"]:
                 self.end("Step movement failure.")
@@ -160,8 +163,9 @@ class Square(Attack):
             if new_loss < loss:
                 x_adv = x_adv_candidate.clone()
                 loss = new_loss
-            pbar.set_description(
-                f"Step: {t} | True Label: {y} | Predicted Label: {torch.argmax(self._model.model(x_adv))} | Loss: {loss} | square_size: {s} | Cache Hits : {self._model.cache_hits}/{self._model.total}")
+            log_msg = f"Step: {t} | True Label: {y} | Predicted Label: {torch.argmax(self._model.model(x_adv))} | Loss: {loss} | square_size: {s} | Cache Hits : {self._model.cache_hits}/{self._model.total}"
+            pbar.set_description(log_msg)
+            self.square_logger.info(log_msg)
             if loss == 0:
                 assert torch.max(torch.abs(x_adv - x)) <= self.attack_config["eps"] + 10 ** -4
                 return x_adv
@@ -212,6 +216,8 @@ class Square(Attack):
                 lower = mid
             print(
                 f"Num Squares : {ns:.6f} | Cache Hits : {cache_hits}/{self.attack_config['adaptive']['bs_num_squares_sample_size']}")
+            self.square_logger.info(
+                f"Num Squares : {ns:.6f} | Cache Hits : {cache_hits}/{self.attack_config['adaptive']['bs_num_squares_sample_size']}")
         return int(ns)
 
     def binary_search_min_square_size(self, x, x_adv, num_squares):
@@ -233,5 +239,7 @@ class Square(Attack):
             else:
                 lower = mid
             print(
+                f"Min Square Size : {min_ss:.6f} | Cache Hits : {cache_hits}/{self.attack_config['adaptive']['bs_min_square_size_sample_size']}")
+            self.square_logger.info(
                 f"Min Square Size : {min_ss:.6f} | Cache Hits : {cache_hits}/{self.attack_config['adaptive']['bs_min_square_size_sample_size']}")
         return int(min_ss)

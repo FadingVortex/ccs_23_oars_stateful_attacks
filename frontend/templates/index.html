@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>深度学习训练</title>
+</head>
+<body>
+    <h1>深度学习训练信息</h1>
+    <button id="startButton">开始训练</button>
+    <div id="outputDisplay" style="white-space: pre-wrap;"></div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            const startButton = document.getElementById('startButton');
+            const outputDisplay = document.getElementById('outputDisplay');
+            let eventSource = null;
+
+            startButton.addEventListener('click', function() {
+                fetch('/start_training')
+                    .then(response => response.json())
+                    .then(data => {
+                        console.log(data.message);
+                        if (data.message === 'Training started') {
+                            if (eventSource) {
+                                eventSource.close();
+                            }
+                            eventSource = new EventSource('/training_stream');
+
+                            eventSource.onmessage = function(event) {
+                                const message = event.data;
+                                console.log("Received SSE message:", message);
+                                if (message === '[TRAINING_END]') {
+                                    outputDisplay.innerHTML += "训练完成！\n";
+                                    eventSource.close();
+                                } else {
+                                    outputDisplay.innerHTML += message + "\n";
+                                }
+                            };
+
+                            eventSource.onerror = function(error) {
+                                console.error("EventSource failed:", error);
+                                if (eventSource && eventSource.readyState !== EventSource.CONNECTING) {
+                                    eventSource.close();
+                                }
+                            };
+                        }
+                    });
+            });
+        });
+    </script>
+</body>
+</html>
